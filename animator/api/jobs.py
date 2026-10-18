@@ -17,11 +17,10 @@ import threading
 from functools import cache
 from pathlib import Path
 
-from google import genai
-
-from ..cli import resolve_model, resolve_region_model
+from ..backends import gemini_backend
+from ..cli import resolve_model
 from ..gemini.pipeline import StoryboardOptions, run_storyboard
-from ..gemini.settings import DEFAULT_IMAGE_MODEL, DEFAULT_TEXT_MODEL, DEFAULT_TTS_MODEL
+from ..gemini.settings import DEFAULT_IMAGE_MODEL, DEFAULT_REGION_MODEL, DEFAULT_TEXT_MODEL, DEFAULT_TTS_MODEL
 from . import supabase
 from .settings import get_settings
 
@@ -55,13 +54,13 @@ def _render(video: dict, output: Path, api_key: str) -> list[float]:
         output=output,
         quality=video["quality"],
         text_model=resolve_model(None, DEFAULT_TEXT_MODEL),
-        region_model=resolve_region_model(None),
+        region_model=DEFAULT_REGION_MODEL,
         image_model=DEFAULT_IMAGE_MODEL,
         tts_model=DEFAULT_TTS_MODEL,
         voice=video["voice"],
         num_scenes=video["scenes"],
     )
-    return run_storyboard(genai.Client(api_key=api_key), options)
+    return run_storyboard(gemini_backend(api_key=api_key), options)
 
 
 def _finish(video: dict, storage_path: str, durations: list[float]) -> None:

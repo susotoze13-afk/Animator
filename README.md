@@ -89,6 +89,48 @@ cp env.example .env                # then paste your key into .env
 
 Get a key at [Google AI Studio](https://aistudio.google.com/apikey). The `.env` file is loaded automatically and is git-ignored.
 
+### Backends
+
+`--prompt` and `--detect-regions` run on any of three providers:
+
+- **Gemini** — `GEMINI_API_KEY` (Google AI Studio), the original backend.
+- **OpenRouter** — `OPENROUTER_API_KEY` ([openrouter.ai/keys](https://openrouter.ai/keys)); one
+  OpenAI-compatible key for text/vision, image generation and text-to-speech.
+- **opencode** — no Google/OpenRouter key needed. Text, vision and images run on
+  [Pollinations](https://pollinations.ai) using the same API key your OpenCode `image` tool is
+  already configured with (`~/.config/opencode/pollinations-shim/token.txt`, or
+  `POLLINATIONS_API_KEY`); narration is spoken by the OS text-to-speech (Windows SAPI). The
+  `opencode` CLI itself is not used — it is a full agent, not a plain chat endpoint.
+
+The backend is auto-detected: OpenRouter when `OPENROUTER_API_KEY` is set, else Gemini when a Google
+key is set, else opencode. Force one with `ANIMATOR_BACKEND=gemini`, `ANIMATOR_BACKEND=openrouter` or
+`ANIMATOR_BACKEND=opencode`. Model slugs change often — list the ones your key can use and pin them
+in `.env`:
+
+```bash
+python -m animator.openrouter.discover --type image      # or text / speech
+# OPENROUTER_TEXT_MODEL=google/gemini-3.8-flash
+# OPENROUTER_IMAGE_MODEL=google/gemini-3.1-flash-image
+# OPENROUTER_TTS_MODEL=google/gemini-2.5-flash-preview-tts
+```
+
+opencode overrides (all optional):
+
+```bash
+# OPENCODE_TEXT_MODEL=openai            # Pollinations chat model (vision-capable)
+# OPENCODE_REGION_MODEL=openai
+# POLLINATIONS_IMAGE_MODEL=black-forest-labs/flux.1.1-pro
+# POLLINATIONS_FREE_MODEL=flux          # free fallback model (legacy endpoint)
+# POLLINATIONS_TEXT_URL=https://text.pollinations.ai/openai
+# OPENCODE_SAPI_VOICE=Microsoft Zira Desktop   # or "Microsoft Irina Desktop" for RU
+```
+
+Pollinations keys spend "pollen". With a zero balance the backend keeps working on the free
+anonymous endpoints: the storyboard still generates (free text API), but vision is unavailable so
+frames draw sequentially instead of beat-by-beat, and the free image model is rate-limited (about
+one image per 45 s) with noticeably lower fidelity. For proper whiteboard frames and region-synced
+drawing, top up at <https://enter.pollinations.ai/top-up>.
+
 ### With Docker
 
 Runs the web app and its API together. You need Docker, plus the two `.env` files from setup: the repo's
@@ -211,7 +253,15 @@ deploy/         Caddy config and one-time server setup
 ## Troubleshooting
 
 - **`ffmpeg` not found:** install FFmpeg (see Setup) and open a new terminal. The pip package called `ffmpeg` is not the same thing.
-- **`needs GEMINI_API_KEY`:** put the key in `.env`, or `export GEMINI_API_KEY=...`.
+- **`needs GEMINI_API_KEY` / `needs OPENROUTER_API_KEY`:** put the key in `.env`, or `export` it. With
+  both set, pick one via `ANIMATOR_BACKEND`.
+- **opencode backend key error:** it reads `POLLINATIONS_API_KEY`, falling back to OpenCode's
+  `~/.config/opencode/pollinations-shim/token.txt`. Set `POLLINATIONS_API_KEY` in `.env` if that file
+  is missing. Narration needs Windows (SAPI) on that backend.
+- **Grey/collage image breaks the renderer:** the renderer expects clean white-background line art.
+  If a generated frame is not white, set a better `POLLINATIONS_IMAGE_MODEL` (the free
+  `black-forest-labs/flux.1.1-pro` works well) and keep a multiple-of-32 16:9 size.
+- **`model ... does not exist` (OpenRouter):** the slug moved — run `python -m animator.openrouter.discover` and set `OPENROUTER_*_MODEL` in `.env`.
 - **429 / rate-limit warnings:** these calls are retried automatically with backoff. On the free tier, use fewer scenes with `--scenes 3`.
 - **A caption appears before it is spoken:** run with `--save-storyboard` and check `scene_XX.regions.json`. Each region's `beat` decides when it draws.
 

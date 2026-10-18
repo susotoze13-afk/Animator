@@ -372,6 +372,14 @@ class Animator:
             scale = available / max(sum(durations), 1e-6)
             durations = [max(duration * scale, 0.08) for duration in durations]
             gap = max((window - sum(durations)) / max(len(objects) - 1, 1), 0.0)
+            total = sum(durations) + gap * (len(objects) - 1)
+            if total > window:
+                # The per-object floor still overflows a very short window
+                # (many objects, little narration time). Compress everything
+                # proportionally so drawing never runs past its cue.
+                factor = window / total
+                durations = [duration * factor for duration in durations]
+                gap *= factor
 
         schedule = []
         cursor = start
@@ -463,10 +471,21 @@ class Animator:
             ct_crop = ct[sl]
             missing_component_ink = mask_crop & ~np.isfinite(ct_crop)
             if missing_component_ink.any():
-                raise RuntimeError(
-                    "component trace omitted "
-                    f"{int(missing_component_ink.sum())} pixels in "
-                    f"({comp['left']},{comp['top']},{comp['right']},{comp['bottom']})"
+                # A handful of anti-aliased edge pixels can dodge the tracer's
+                # coverage. Rather than abort the whole video, let them draw
+                # with their nearest traced neighbour (the same fallback the
+                # contour/dense tracers use internally).
+                finite = np.isfinite(ct_crop)
+                ys_m, xs_m = np.where(missing_component_ink)
+                if finite.any():
+                    _, near = ndimage.distance_transform_edt(~finite, return_indices=True)
+                    ct_crop[ys_m, xs_m] = ct_crop[near[0, ys_m, xs_m], near[1, ys_m, xs_m]]
+                else:
+                    ct_crop[ys_m, xs_m] = comp_start
+                logger.warning(
+                    "component trace omitted %d pixels in (%d,%d,%d,%d); filled from nearest",
+                    int(missing_component_ink.sum()),
+                    comp["left"], comp["top"], comp["right"], comp["bottom"],
                 )
             timing[sl][mask_crop] = ct_crop[mask_crop]
 

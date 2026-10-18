@@ -66,36 +66,19 @@ def validate_inputs(args: argparse.Namespace) -> None:
     require_tools(need_ffprobe=bool(args.audio))
 
 
-def gemini_client() -> "genai.Client":
-    try:
-        from google import genai
-    except ImportError as exc:
-        raise SystemExit(
-            "this needs the gemini extra: pip install -r requirements.txt"
-        ) from exc
-    api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
-    if not api_key:
-        raise SystemExit("needs GEMINI_API_KEY (or GOOGLE_API_KEY) in the environment")
-    return genai.Client(api_key=api_key)
-
-
 def resolve_model(cli_model: str | None, default: str) -> str:
     return cli_model or os.environ.get("GEMINI_MODEL") or default
 
 
-def resolve_region_model(cli_model: str | None) -> str:
-    from .gemini.settings import DEFAULT_REGION_MODEL
-    return resolve_model(cli_model, DEFAULT_REGION_MODEL)
-
-
 def detect_plan(image: Path, narration: str, model: str | None) -> SnippetRegionPlan:
-    from .gemini.detect_regions import detect_region_plan
+    from .backends import select_backend
 
-    return asyncio.run(detect_region_plan(
-        google_client=gemini_client(),
+    backend = select_backend()
+    return asyncio.run(backend.detect_region_plan(
+        backend.client,
         image_path=image,
         transcript_text=narration,
-        model=resolve_region_model(model),
+        model=resolve_model(model, backend.region_model),
     ))
 
 
@@ -114,25 +97,28 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--regions", nargs="*", default=[],
                         help="one region plan JSON per image, in the same order")
     parser.add_argument("--detect-regions", action="store_true",
-                        help="ask Gemini for a region plan per image (needs GEMINI_API_KEY)")
+                        help="ask the model for a region plan per image "
+                             "(needs GEMINI_API_KEY, OPENROUTER_API_KEY, or the keyless "
+                             "opencode backend)")
     parser.add_argument("--narration", nargs="*", default=[],
                         help="narration text per image, used by --detect-regions")
     parser.add_argument("--gemini-model", default=None,
-                        help="text model for region/storyboard generation "
-                             "(default: $GEMINI_MODEL or a built-in default)")
+                        help="text/vision model for storyboard and region generation "
+                             "(default: the backend's model, overridable via $GEMINI_MODEL)")
     parser.add_argument("--save-regions", action="store_true",
                         help="write detected plans next to the output as <output>.regions.<n>.json")
     parser.add_argument("--prompt", default=None,
                         help="generate a full storyboard (images, narration, regions) from one idea "
-                             "via Gemini, instead of passing images; needs GEMINI_API_KEY")
+                             "via the selected backend (Gemini, OpenRouter or opencode); needs the "
+                             "matching API key, or no key at all for opencode")
     parser.add_argument("--scenes", type=int, default=None,
-                        help="number of scenes when using --prompt (default: let Gemini decide)")
-    parser.add_argument("--voice", default="Kore",
-                        help="Gemini TTS voice name for --prompt narration (default: Kore)")
+                        help="number of scenes when using --prompt (default: let the model decide)")
+    parser.add_argument("--voice", default=None,
+                        help="TTS voice name for --prompt narration (default: the backend's voice)")
     parser.add_argument("--image-model", default=None,
-                        help="Gemini image model for --prompt scene art")
+                        help="image model for --prompt scene art")
     parser.add_argument("--tts-model", default=None,
-                        help="Gemini TTS model for --prompt narration")
+                        help="TTS model for --prompt narration")
     parser.add_argument("--save-storyboard", action="store_true",
                         help="keep generated images/audio/regions next to the output "
                              "instead of discarding them after rendering")
@@ -141,9 +127,10 @@ def build_parser() -> argparse.ArgumentParser:
 
 
 def run_from_prompt(args: argparse.Namespace) -> int:
+    from .backends import select_backend
     from .gemini.pipeline import StoryboardOptions, run_storyboard
-    from .gemini.settings import DEFAULT_IMAGE_MODEL, DEFAULT_TEXT_MODEL, DEFAULT_TTS_MODEL
 
+    backend = select_backend()
     output = Path(args.output)
     validate_output(output, [])
     require_tools(need_ffprobe=True)
@@ -152,15 +139,15 @@ def run_from_prompt(args: argparse.Namespace) -> int:
         idea=args.prompt,
         output=output,
         quality=args.quality,
-        text_model=resolve_model(args.gemini_model, DEFAULT_TEXT_MODEL),
-        region_model=resolve_region_model(args.gemini_model),
-        image_model=args.image_model or DEFAULT_IMAGE_MODEL,
-        tts_model=args.tts_model or DEFAULT_TTS_MODEL,
-        voice=args.voice,
+        text_model=resolve_model(args.gemini_model, backend.text_model),
+        region_model=resolve_model(args.gemini_model, backend.region_model),
+        image_model=args.image_model or backend.image_model,
+        tts_model=args.tts_model or backend.tts_model,
+        voice=args.voice or backend.default_voice,
         num_scenes=args.scenes,
         save_assets=args.save_storyboard,
     )
-    durations = run_storyboard(gemini_client(), options)
+    durations = run_storyboard(backend, options)
     print(f"wrote {args.output} ({sum(durations):.1f}s, {len(durations)} scene(s))", file=sys.stderr)
     return 0
 
