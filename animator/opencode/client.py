@@ -21,6 +21,7 @@ import json
 import logging
 import os
 import random
+import re
 import subprocess
 import tempfile
 import threading
@@ -38,7 +39,9 @@ from .settings import (
     CHAT_TIMEOUT_SEC,
     DEFAULT_VOICE,
     FREE_IMAGE_MIN_INTERVAL_SEC,
+    FREE_TEXT_MIN_INTERVAL_SEC,
     IMAGE_HEIGHT,
+    IMAGE_SOURCE,
     IMAGE_TIMEOUT_SEC,
     IMAGE_WIDTH,
     MAX_RETRIES,
@@ -49,6 +52,9 @@ from .settings import (
     POLLINATIONS_TEXT_URL,
     RETRY_DELAY_SEC,
     SAPI_RATE,
+    SD_API_URL,
+    SD_HEIGHT,
+    SD_WIDTH,
     chat_url,
     pollinations_token,
 )
@@ -62,10 +68,29 @@ _RETRYABLE_IMAGE_STATUS = (402, 429)
 # free path is serialized and spaced out across scenes.
 _free_image_lock = threading.Lock()
 _last_free_image_at = [0.0]
+_free_text_lock = threading.Lock()
+_last_free_text_at = [0.0]
 _SYSTEM_JSON = (
     "Respond with a single valid JSON object and nothing else — no prose, "
     "no markdown, no code fences. It must match this JSON schema:\n"
 )
+_SYSTEM_JSON_COMPACT = (
+    "Return ONLY compact JSON matching this schema: no reasoning, no prose, "
+    "no markdown, no code fences. Start with '{' and end with '}'.\n"
+)
+
+
+def _compact_schema(obj: Any) -> Any:
+    """Drop descriptions/titles so the free reasoning model does not overthink."""
+    if isinstance(obj, dict):
+        return {
+            key: _compact_schema(value)
+            for key, value in obj.items()
+            if key not in ("description", "title", "default", "examples")
+        }
+    if isinstance(obj, list):
+        return [_compact_schema(item) for item in obj]
+    return obj
 
 
 class OpenCodeError(RuntimeError):
@@ -114,6 +139,48 @@ class OpenCodeClient:
             )
         return self._validate(data, schema)
 
+    def chat_text(self, model: str, messages: List[Dict[str, Any]], *,
+                  temperature: Optional[float] = None) -> str:
+        """Plain-text chat (no JSON schema), with the same free-endpoint fallback."""
+        payload: Dict[str, Any] = {"model": model, "messages": messages}
+        if temperature is not None:
+            payload["temperature"] = temperature
+        try:
+            return self._content(self._post_chat(payload))
+        except OpenCodeError as exc:
+            if self._has_image(messages) or not self._key_unavailable(exc):
+                raise
+            logger.warning("keyed chat unavailable (%s); using the free text endpoint", exc)
+            return self._content(self._post_chat(payload, url=POLLINATIONS_TEXT_URL))
+
+    @staticmethod
+    def _looks_like_balance(text: str) -> bool:
+        lowered = text.lower()
+        return (
+            "enough credits" in lowered
+            or "insufficient balance" in lowered
+            or "not enough pollen" in lowered
+            or ("top up" in lowered and "pollinations" in lowered)
+        )
+
+    @staticmethod
+    def _content(data: Dict[str, Any]) -> str:
+        try:
+            message = data["choices"][0]["message"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise OpenCodeError(f"unexpected chat response: {json.dumps(data)[:500]}") from exc
+        content = message.get("content") if isinstance(message, dict) else None
+        if isinstance(content, list):
+            content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
+        if not content:
+            # The free endpoint sometimes returns only a reasoning trace.
+            content = message.get("reasoning") if isinstance(message, dict) else None
+        if not content:
+            raise OpenCodeError(f"empty chat reply: {json.dumps(data)[:500]}")
+        if OpenCodeClient._looks_like_balance(content):
+            raise OpenCodeError(f"chat balance error: {content[:300]}")
+        return content
+
     def _free_chat_fallback(self, exc: OpenCodeError, model: str, messages, schema,
                             temperature) -> Dict[str, Any]:
         # Vision needs the keyed endpoint; the free text endpoint hangs on
@@ -130,7 +197,7 @@ class OpenCodeClient:
                  temperature: Optional[float], *, legacy: bool = False) -> Dict[str, Any]:
         payload: Dict[str, Any] = {
             "model": model,
-            "messages": self._with_schema(messages, schema),
+            "messages": self._with_schema(messages, schema, compact=legacy),
         }
         # The free legacy endpoint hangs on response_format; the JSON schema
         # instruction in the system prompt is what actually pins the shape.
@@ -156,19 +223,18 @@ class OpenCodeClient:
         return any(token in text for token in ("401", "402", "UNAUTHORIZED", "INSUFFICIENT_BALANCE", "balance"))
 
     @staticmethod
-    def _with_schema(messages: List[Dict[str, Any]], schema: Type[T]) -> List[Dict[str, Any]]:
-        instruction = _SYSTEM_JSON + json.dumps(schema.model_json_schema())
+    def _with_schema(messages: List[Dict[str, Any]], schema: Type[T], *, compact: bool = False) -> List[Dict[str, Any]]:
+        raw = schema.model_json_schema()
+        if compact:
+            raw = _compact_schema(raw)
+        prefix = _SYSTEM_JSON_COMPACT if compact else _SYSTEM_JSON
+        instruction = prefix + json.dumps(raw)
         return [{"role": "system", "content": instruction}, *messages]
 
     @staticmethod
     def _validate(data: Dict[str, Any], schema: Type[T]) -> T:
-        try:
-            content = data["choices"][0]["message"]["content"]
-        except (KeyError, IndexError, TypeError) as exc:
-            raise OpenCodeError(f"unexpected chat response: {json.dumps(data)[:500]}") from exc
-        if isinstance(content, list):
-            content = "".join(part.get("text", "") for part in content if isinstance(part, dict))
-        parsed = extract_json(content or "")
+        content = OpenCodeClient._content(data)
+        parsed = OpenCodeClient._parse_json(OpenCodeClient._normalize_json_text(content))
         try:
             return schema.model_validate(parsed)
         except ValidationError as first:
@@ -184,6 +250,30 @@ class OpenCodeClient:
                     f"model reply did not match {schema.__name__}: {exc}; "
                     f"raw: {json.dumps(parsed, ensure_ascii=False)[:800]}"
                 ) from first
+
+    @staticmethod
+    def _normalize_json_text(text: str) -> str:
+        """Undo the typographic quotes free models often emit."""
+        return (
+            text.replace("\u201c", '"').replace("\u201d", '"')
+            .replace("\u2018", "'").replace("\u2019", "'")
+            .replace("\ufeff", "")
+        )
+
+    @staticmethod
+    def _parse_json(text: str) -> Any:
+        try:
+            return extract_json(text)
+        except Exception as first:  # noqa: BLE001 - try a lenient repair
+            start, end = text.find("{"), text.rfind("}")
+            snippet = text[start:end + 1] if start != -1 and end > start else text
+            candidates = [snippet, re.sub(r",\s*([}\]])", r"\1", snippet)]
+            for candidate in candidates:
+                try:
+                    return json.loads(candidate)
+                except json.JSONDecodeError:
+                    continue
+            raise OpenCodeError(f"could not parse JSON: {first}; raw={text[:400]!r}") from first
 
     _COORD_KEYS = ("ymin", "xmin", "ymax", "xmax")
     _INT_KEYS = ("reveal_order", "beat")
@@ -225,6 +315,24 @@ class OpenCodeClient:
     def generate_image(self, model: str, prompt: str, *, aspect_ratio: Optional[str] = None) -> bytes:
         width, height = self._size(aspect_ratio)
         seed = random.randint(0, 999_999)
+        if IMAGE_SOURCE in ("auto", "sdwebui"):
+            # A local SD WebUI is free and follows the whiteboard style far
+            # better than the free Pollinations tier, so try it first.
+            try:
+                from ..sdwebui.client import generate_image as sd_generate, sd_available
+
+                if sd_available():
+                    sd_w, sd_h = (SD_WIDTH, SD_HEIGHT) if aspect_ratio == "16:9" else (512, 512)
+                    return sd_generate(prompt, sd_w, sd_h, seed=seed)
+                if IMAGE_SOURCE == "sdwebui":
+                    raise OpenCodeError(f"SD WebUI is not reachable at {SD_API_URL}")
+            except OpenCodeError:
+                raise
+            except Exception as exc:
+                if IMAGE_SOURCE == "sdwebui":
+                    raise OpenCodeError(f"SD WebUI failed: {exc}") from exc
+                logger.warning("SD WebUI unavailable (%s); using Pollinations", exc)
+
         errors: List[str] = []
         if self.token:
             for candidate in dict.fromkeys([model, *POLLINATIONS_FALLBACK_MODELS]):
@@ -362,43 +470,81 @@ class OpenCodeClient:
             out.unlink(missing_ok=True)
 
     # --- transport -------------------------------------------------------
+    @staticmethod
+    def _free_text_delay() -> float:
+        return max(0.0, FREE_TEXT_MIN_INTERVAL_SEC - (time.monotonic() - _last_free_text_at[0]))
+
     def _post_chat(self, payload: Dict[str, Any], *, url: Optional[str] = None) -> Dict[str, Any]:
         url = url or chat_url()
-        for attempt in range(1, MAX_RETRIES + 1):
+        free = url == POLLINATIONS_TEXT_URL
+        attempts = 3 if free else MAX_RETRIES
+        for attempt in range(1, attempts + 1):
             try:
-                response = httpx.post(url, json=payload, headers=self._headers(), timeout=self.timeout)
+                if free:
+                    with _free_text_lock:
+                        wait = self._free_text_delay()
+                        if wait > 0:
+                            time.sleep(wait)
+                        response = httpx.post(url, json=payload, headers={}, timeout=self.timeout)
+                        _last_free_text_at[0] = time.monotonic()
+                else:
+                    response = httpx.post(url, json=payload, headers=self._headers(), timeout=self.timeout)
             except httpx.HTTPError as exc:
-                if attempt == MAX_RETRIES:
+                if free:
+                    _last_free_text_at[0] = time.monotonic()
+                if attempt >= attempts:
                     raise OpenCodeError(f"chat request failed: {exc}") from exc
-                logger.warning("chat request error (%s); retry %s/%s", exc, attempt, MAX_RETRIES)
-                time.sleep(RETRY_DELAY_SEC * attempt)
+                logger.warning("chat request error (%s); retry %s/%s", exc, attempt, attempts)
+                if not free:
+                    time.sleep(RETRY_DELAY_SEC * attempt)
                 continue
             if response.status_code == 200:
                 return response.json()
-            if attempt < MAX_RETRIES and _retryable(response.status_code):
-                logger.warning("chat %s; retry %s/%s", response.status_code, attempt, MAX_RETRIES)
+            body = response.text
+            if free and "FREE_LIMIT" in body and attempt < attempts:
+                logger.warning("free text limit hit; retry %s/%s", attempt, attempts)
+                continue
+            if not free and attempt < attempts and _retryable(response.status_code):
+                logger.warning("chat %s; retry %s/%s", response.status_code, attempt, attempts)
                 time.sleep(RETRY_DELAY_SEC * attempt)
                 continue
-            raise OpenCodeError(f"chat failed ({response.status_code}): {response.text[:500]}")
+            raise OpenCodeError(f"chat failed ({response.status_code}): {body[:500]}")
         raise OpenCodeError("chat exhausted retries")  # pragma: no cover
 
     async def _post_chat_async(self, payload: Dict[str, Any], *, url: Optional[str] = None) -> Dict[str, Any]:
         url = url or chat_url()
+        free = url == POLLINATIONS_TEXT_URL
+        attempts = 3 if free else MAX_RETRIES
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            for attempt in range(1, MAX_RETRIES + 1):
+            for attempt in range(1, attempts + 1):
+                if free:
+                    wait = self._free_text_delay()
+                    if wait > 0:
+                        await asyncio.sleep(wait)
                 try:
-                    response = await client.post(url, json=payload, headers=self._headers())
+                    response = await client.post(
+                        url, json=payload, headers={} if free else self._headers(),
+                    )
                 except httpx.HTTPError as exc:
-                    if attempt == MAX_RETRIES:
+                    if free:
+                        _last_free_text_at[0] = time.monotonic()
+                    if attempt >= attempts:
                         raise OpenCodeError(f"chat request failed: {exc}") from exc
-                    logger.warning("chat request error (%s); retry %s/%s", exc, attempt, MAX_RETRIES)
-                    await asyncio.sleep(RETRY_DELAY_SEC * attempt)
+                    logger.warning("chat request error (%s); retry %s/%s", exc, attempt, attempts)
+                    if not free:
+                        await asyncio.sleep(RETRY_DELAY_SEC * attempt)
                     continue
+                if free:
+                    _last_free_text_at[0] = time.monotonic()
                 if response.status_code == 200:
                     return response.json()
-                if attempt < MAX_RETRIES and _retryable(response.status_code):
-                    logger.warning("chat %s; retry %s/%s", response.status_code, attempt, MAX_RETRIES)
+                body = response.text
+                if free and "FREE_LIMIT" in body and attempt < attempts:
+                    logger.warning("free text limit hit; retry %s/%s", attempt, attempts)
+                    continue
+                if not free and attempt < attempts and _retryable(response.status_code):
+                    logger.warning("chat %s; retry %s/%s", response.status_code, attempt, attempts)
                     await asyncio.sleep(RETRY_DELAY_SEC * attempt)
                     continue
-                raise OpenCodeError(f"chat failed ({response.status_code}): {response.text[:500]}")
+                raise OpenCodeError(f"chat failed ({response.status_code}): {body[:500]}")
         raise OpenCodeError("chat exhausted retries")  # pragma: no cover

@@ -143,7 +143,8 @@ def opencode_backend(*, client: Any = None) -> StoryboardBackend:
         DEFAULT_TTS_MODEL,
         DEFAULT_VOICE,
     )
-    from .openrouter import images, narration, storyboard
+    from .opencode import storyboard as oc_storyboard
+    from .openrouter import images, narration
 
     return StoryboardBackend(
         name="opencode",
@@ -153,7 +154,7 @@ def opencode_backend(*, client: Any = None) -> StoryboardBackend:
         image_model=DEFAULT_IMAGE_MODEL,
         tts_model=DEFAULT_TTS_MODEL,
         default_voice=DEFAULT_VOICE,
-        generate_storyboard=storyboard.generate_storyboard,
+        generate_storyboard=oc_storyboard.generate_storyboard,
         generate_scene_image=images.generate_scene_image,
         generate_beat_narration=narration.generate_beat_narration,
         detect_region_plan=_opencode_region_plan,

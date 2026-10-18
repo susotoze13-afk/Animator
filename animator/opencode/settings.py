@@ -46,6 +46,20 @@ POLLINATIONS_FALLBACK_MODELS = (
 # 16:9 with both sides a multiple of 32 (FLUX rejects anything else).
 IMAGE_WIDTH = int(os.getenv("POLLINATIONS_IMAGE_WIDTH", "1024"))
 IMAGE_HEIGHT = int(os.getenv("POLLINATIONS_IMAGE_HEIGHT", "576"))
+
+# Image source. "auto" prefers a reachable local SD WebUI (free, whiteboard
+# quality) and falls back to Pollinations; "sdwebui"/"pollinations" force one.
+IMAGE_SOURCE = os.getenv("OPENCODE_IMAGE_SOURCE", "auto").strip().lower()
+SD_API_URL = os.getenv("SD_API_URL", "http://localhost:7860")
+SD_MODEL = os.getenv("SD_MODEL", "")
+SD_STEPS = int(os.getenv("SD_STEPS", "28"))
+SD_CFG = float(os.getenv("SD_CFG", "7"))
+SD_SAMPLER = os.getenv("SD_SAMPLER", "DPM++ 2M Karras")
+SD_NEGATIVE_PROMPT = os.getenv("SD_NEGATIVE_PROMPT", "")
+# SD 1.5 is happiest near 512px; 768x432 keeps 16:9 without duplicating too much.
+SD_WIDTH = int(os.getenv("SD_WIDTH", "768"))
+SD_HEIGHT = int(os.getenv("SD_HEIGHT", "432"))
+SD_TIMEOUT_SEC = float(os.getenv("SD_TIMEOUT_SEC", "300"))
 # Pollinations key: env first, then the token the OpenCode image shim keeps.
 POLLINATIONS_TOKEN_FILE = Path(
     os.getenv("POLLINATIONS_TOKEN_FILE", str(Path.home() / ".config" / "opencode" / "pollinations-shim" / "token.txt"))
@@ -59,6 +73,8 @@ SAPI_RATE = int(os.getenv("OPENCODE_SAPI_RATE", "0"))
 
 MAX_RETRIES = int(os.getenv("OPENCODE_MAX_RETRIES", "4"))
 RETRY_DELAY_SEC = float(os.getenv("OPENCODE_RETRY_DELAY_SEC", "6"))
+# The anonymous text endpoint allows about one reply per 30s per IP.
+FREE_TEXT_MIN_INTERVAL_SEC = float(os.getenv("POLLINATIONS_FREE_TEXT_INTERVAL_SEC", "31"))
 CHAT_TIMEOUT_SEC = float(os.getenv("OPENCODE_CHAT_TIMEOUT_SEC", "300"))
 IMAGE_TIMEOUT_SEC = float(os.getenv("POLLINATIONS_TIMEOUT_SEC", "300"))
 

@@ -126,10 +126,17 @@ opencode overrides (all optional):
 ```
 
 Pollinations keys spend "pollen". With a zero balance the backend keeps working on the free
-anonymous endpoints: the storyboard still generates (free text API), but vision is unavailable so
-frames draw sequentially instead of beat-by-beat, and the free image model is rate-limited (about
-one image per 45 s) with noticeably lower fidelity. For proper whiteboard frames and region-synced
-drawing, top up at <https://enter.pollinations.ai/top-up>.
+anonymous endpoints: the storyboard still generates from a compact plain-text prompt (free text
+API), but vision is unavailable so frames draw sequentially instead of beat-by-beat, and the free
+image model is rate-limited (about one image per 45 s) with noticeably lower fidelity. For proper
+whiteboard frames and region-synced drawing, top up at <https://enter.pollinations.ai/top-up>.
+
+**Local Stable Diffusion (free).** Set `OPENCODE_IMAGE_SOURCE=auto` (default) and keep a Stable
+Diffusion WebUI running at `SD_API_URL` (default `http://localhost:7860`). The backend then draws
+frames through `/sdapi/v1/txt2img` instead of Pollinations — no pollen, and the prompt is steered
+to black marker on white paper. Any AUTOMATIC1111/Forge instance works; the
+`Kolyamba_News_animation` project ships one under `project/sd-webui` (`python launch.py --api
+--nowebui --port 7860`).
 
 ### With Docker
 
